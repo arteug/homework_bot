@@ -8,7 +8,7 @@ import requests
 from dotenv import load_dotenv
 from telebot import TeleBot
 
-from exceptions import InvalidResponseCodeException
+from exceptions import InvalidResponseCodeException, FailToSendTGMessage
 
 load_dotenv()
 
@@ -65,7 +65,7 @@ def send_message(bot, message):
     """Send a message to TG chat."""
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-    except Exception as e:
+    except FailToSendTGMessage as e:
         logger.error(f'Failed to send message to '
                      f'chat_id {TELEGRAM_CHAT_ID}, {e}')
         return False
@@ -130,7 +130,6 @@ def main():
     check_tokens()
     bot = TeleBot(TELEGRAM_TOKEN)
     timestamp = int(time.time())
-    current_report = ''
     previous_report = ''
     while True:
         try:
