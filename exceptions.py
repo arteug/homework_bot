@@ -1,0 +1,2 @@
+class InvalidResponseCodeException(Exception):
+    pass

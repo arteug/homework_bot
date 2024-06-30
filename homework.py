@@ -2,16 +2,32 @@ import os
 import sys
 import time
 import logging
+from http import HTTPStatus
 
 import requests
 from dotenv import load_dotenv
 from telebot import TeleBot
 
+from exceptions import InvalidResponseCodeException
+
 load_dotenv()
 
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s [%(levelname)s] %(message)s',
-                    filename='main.log')
+logger = logging.getLogger('logger')
+logger.setLevel(logging.DEBUG)
+logger_formatter = logging.Formatter('%(asctime)s - %(name)s [%(levelname)s] '
+                                     '%(funcName)s - %(lineno)d - %(message)s')
+
+file_handler = logging.FileHandler(os.path.join(os.path.abspath(__file__),
+                                                f'{__file__}.log'))
+file_handler.setLevel(logging.DEBUG)
+
+file_handler.setFormatter(logger_formatter)
+logger.addHandler(file_handler)
+
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setLevel(logging.DEBUG)
+stream_handler.setFormatter(logger_formatter)
+logger.addHandler(stream_handler)
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -27,17 +43,22 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-PREVIOUS_STATUS = ''
-
 
 def check_tokens():
     """Check environment variables."""
-    if None not in (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, PRACTICUM_TOKEN):
-        return True
-    else:
-        logging.critical('Required environment variables are missing '
-                         'to launch the bot')
-        return False
+    tokens = (('PRACTICUM_TOKEN', PRACTICUM_TOKEN),
+              ('TELEGRAM_TOKEN', TELEGRAM_TOKEN),
+              ('TELEGRAM_CHAT_ID', TELEGRAM_CHAT_ID))
+    all_tokens_present = True
+    missing_tokens = []
+    for token_name, token_value in tokens:
+        if not token_value:
+            all_tokens_present = False
+            missing_tokens.append(token_name)
+    if not all_tokens_present:
+        logger.critical(f'Отсутствуют следующие токены: '
+                        f'{", ".join(missing_tokens)}')
+        sys.exit(1)
 
 
 def send_message(bot, message):
@@ -45,48 +66,60 @@ def send_message(bot, message):
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
     except Exception as e:
-        logging.error(f'Failed to send message to '
-                      f'chat_id {TELEGRAM_CHAT_ID}, {e}')
-        return e
-    logging.debug(f'Sent message to chat_id {TELEGRAM_CHAT_ID}')
+        logger.error(f'Failed to send message to '
+                     f'chat_id {TELEGRAM_CHAT_ID}, {e}')
+        return False
+    logger.debug(f'Sent message to chat_id {TELEGRAM_CHAT_ID}')
+    return True
 
 
 def get_api_answer(timestamp):
     """Get info from YANDEX API."""
+    request_data = {
+        'url': ENDPOINT,
+        'headers': HEADERS,
+        'params': {'from_date': timestamp}
+    }
     try:
-        response = requests.get(ENDPOINT, headers=HEADERS,
-                                params={'from_date': timestamp})
-    except requests.RequestException as e:
-        logging.error(f'Failed to get answer for {ENDPOINT}')
-        return f'Exception occurred while requesting YANDEX API, {e}'
-    if response.status_code != 200:
-        raise Exception(f'Yandex API returned {response.status_code}')
+        response = requests.get(request_data['url'],
+                                headers=request_data['headers'],
+                                params=request_data['params'])
+        logger.info(f'Request to YANDEX api, url: {request_data["url"]}, '
+                    f'headers: {request_data["headers"]}, '
+                    f'params: {request_data["params"]}')
+    except requests.RequestException:
+        raise ConnectionError(f'Exception occurred while request to YA_API '
+                              f'with url: {request_data["url"]}, '
+                              f'headers: {request_data["headers"]}, '
+                              f'params: {request_data["params"]}')
+    if response.status_code != HTTPStatus.OK:
+        raise InvalidResponseCodeException(
+            f'Yandex API returned {response.status_code}, '
+            f'reason: {response.reason}, '
+            f'response text: {response.text}')
     return response.json()
 
 
 def check_response(response):
     """Check response from YANDEX API for containing keys."""
     if not isinstance(response, dict):
-        print(isinstance(response, dict))
         raise TypeError('Response is not a dictionary')
     if 'homeworks' not in response:
-        logging.error('Failed to get "homeworks" in response JSON object')
         raise KeyError('Failed to get "homeworks" in response JSON object')
-    if not isinstance(response['homeworks'], list):
+    homeworks = response['homeworks']
+    if not isinstance(homeworks, list):
         raise TypeError('"response[homeworks]" is not a list]"')
-    return True
+    return homeworks
 
 
 def parse_status(homework):
     """Parse homework statuses and prepare string to send to Telegram."""
-    global PREVIOUS_STATUS
-    print(homework)
-    if 'homework_name' not in homework:
-        logging.error('Missing "homework_name" in homework')
-        raise KeyError('"homework_name" key not found.')
-    if homework['status'] not in HOMEWORK_VERDICTS.keys():
-        logging.error(f'Homework status {homework["status"]} not recognized')
+    if 'status' not in homework:
+        raise KeyError('Failed to get " homework status" in response object')
+    if homework['status'] not in HOMEWORK_VERDICTS:
         raise KeyError(f'Unknown homework status: {homework["status"]}')
+    if 'homework_name' not in homework:
+        raise KeyError('"homework_name" key not found.')
     verdict = HOMEWORK_VERDICTS.get(homework['status'])
     homework_name = homework['homework_name']
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
@@ -94,27 +127,33 @@ def parse_status(homework):
 
 def main():
     """Main function."""
+    check_tokens()
     bot = TeleBot(TELEGRAM_TOKEN)
     timestamp = int(time.time())
-    if check_tokens():
-        while True:
-            try:
-                response = get_api_answer(timestamp)
-                if check_response(response):
-                    if len(response['homeworks']):
-                        message = parse_status(response['homeworks'][0])
-                        if message:
-                            send_message(bot, message)
-                    else:
-                        logging.debug('Empty homework list in response')
-                        raise Exception('No homeworks found from this period.')
-            except Exception as error:
-                message = f'Сбой в работе программы: {error}'
+    current_report = ''
+    previous_report = ''
+    while True:
+        try:
+            response = get_api_answer(timestamp)
+            homeworks = check_response(response)
+            if len(homeworks) == 0:
+                logger.debug('No homeworks found for now')
+                continue
+            homework = homeworks[0]
+            verdict = parse_status(homework)
+            if verdict != previous_report:
+                if send_message(bot, verdict):
+                    previous_report = verdict
+                    timestamp = response.get('timestamp')
+        except Exception as error:
+            message = f'Сбой в работе программы: {error}'
+            current_report = message
+            logger.error(message)
+            if current_report != previous_report:
                 send_message(bot, message)
+                previous_report = current_report
+        finally:
             time.sleep(RETRY_PERIOD)
-    else:
-        logging.critical('Not enough environment variables')
-        sys.exit(1)
 
 
 if __name__ == '__main__':
