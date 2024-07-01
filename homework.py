@@ -5,10 +5,11 @@ import logging
 from http import HTTPStatus
 
 import requests
+import telebot
 from dotenv import load_dotenv
 from telebot import TeleBot
 
-from exceptions import InvalidResponseCodeException, FailToSendTGMessage
+from exceptions import InvalidResponseCodeException
 
 load_dotenv()
 
@@ -18,7 +19,8 @@ logger_formatter = logging.Formatter('%(asctime)s - %(name)s [%(levelname)s] '
                                      '%(funcName)s - %(lineno)d - %(message)s')
 
 file_handler = logging.FileHandler(os.path.join(os.path.abspath(__file__),
-                                                f'{__file__}.log'))
+                                                f'{__file__}.log'),
+                                   encoding='utf-8')
 file_handler.setLevel(logging.DEBUG)
 
 file_handler.setFormatter(logger_formatter)
@@ -58,14 +60,14 @@ def check_tokens():
     if not all_tokens_present:
         logger.critical(f'Отсутствуют следующие токены: '
                         f'{", ".join(missing_tokens)}')
-        sys.exit(1)
+        raise KeyError('Not all tokens are present.')
 
 
 def send_message(bot, message):
     """Send a message to TG chat."""
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-    except FailToSendTGMessage as e:
+    except telebot.ExceptionHandler as e:
         logger.error(f'Failed to send message to '
                      f'chat_id {TELEGRAM_CHAT_ID}, {e}')
         return False
@@ -81,17 +83,11 @@ def get_api_answer(timestamp):
         'params': {'from_date': timestamp}
     }
     try:
-        response = requests.get(request_data['url'],
-                                headers=request_data['headers'],
-                                params=request_data['params'])
-        logger.info(f'Request to YANDEX api, url: {request_data["url"]}, '
-                    f'headers: {request_data["headers"]}, '
-                    f'params: {request_data["params"]}')
+        response = requests.get(**request_data)
     except requests.RequestException:
-        raise ConnectionError(f'Exception occurred while request to YA_API '
-                              f'with url: {request_data["url"]}, '
-                              f'headers: {request_data["headers"]}, '
-                              f'params: {request_data["params"]}')
+        raise ConnectionError(
+            'Exception occurred while request to YA_API {}'.format(
+                **request_data))
     if response.status_code != HTTPStatus.OK:
         raise InvalidResponseCodeException(
             f'Yandex API returned {response.status_code}, '
@@ -117,7 +113,7 @@ def parse_status(homework):
     if 'status' not in homework:
         raise KeyError('Failed to get " homework status" in response object')
     if homework['status'] not in HOMEWORK_VERDICTS:
-        raise KeyError(f'Unknown homework status: {homework["status"]}')
+        raise ValueError(f'Unknown homework status: {homework["status"]}')
     if 'homework_name' not in homework:
         raise KeyError('"homework_name" key not found.')
     verdict = HOMEWORK_VERDICTS.get(homework['status'])
@@ -135,21 +131,20 @@ def main():
         try:
             response = get_api_answer(timestamp)
             homeworks = check_response(response)
-            if len(homeworks) == 0:
+            if not len(homeworks):
                 logger.debug('No homeworks found for now')
                 continue
             homework = homeworks[0]
             verdict = parse_status(homework)
-            if verdict != previous_report:
-                if send_message(bot, verdict):
-                    previous_report = verdict
-                    timestamp = response.get('timestamp')
+            if verdict != previous_report and send_message(bot, verdict):
+                previous_report = verdict
+                timestamp = response.get('timestamp', timestamp)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             current_report = message
             logger.error(message)
-            if current_report != previous_report:
-                send_message(bot, message)
+            if (current_report != previous_report
+                    and send_message(bot, message)):
                 previous_report = current_report
         finally:
             time.sleep(RETRY_PERIOD)
