@@ -18,9 +18,11 @@ logger.setLevel(logging.DEBUG)
 logger_formatter = logging.Formatter('%(asctime)s - %(name)s [%(levelname)s] '
                                      '%(funcName)s - %(lineno)d - %(message)s')
 
-file_handler = logging.FileHandler(os.path.join(os.path.abspath(__file__),
-                                                f'{__file__}.log'),
-                                   encoding='utf-8')
+file_handler = logging.FileHandler(
+    os.path.join(
+        os.path.abspath(__file__), f'{__file__}.log'),
+    encoding='utf-8'
+)
 file_handler.setLevel(logging.DEBUG)
 
 file_handler.setFormatter(logger_formatter)
@@ -82,12 +84,16 @@ def get_api_answer(timestamp):
         'headers': HEADERS,
         'params': {'from_date': timestamp}
     }
+    logger.info('Request to YANDEX api, url: {url}, '
+                'headers: {headers}, '
+                'params: {params}'.format(**request_data))
     try:
         response = requests.get(**request_data)
-    except requests.RequestException:
+    except requests.RequestException as e:
         raise ConnectionError(
-            'Exception occurred while request to YA_API {}'.format(
-                **request_data))
+            'Exception {e} occurred while request to YA_API with '
+            'url: {url}, headers: {headers}, params: {params}'
+            .format(e, **request_data))
     if response.status_code != HTTPStatus.OK:
         raise InvalidResponseCodeException(
             f'Yandex API returned {response.status_code}, '
@@ -131,7 +137,7 @@ def main():
         try:
             response = get_api_answer(timestamp)
             homeworks = check_response(response)
-            if not len(homeworks):
+            if not homeworks:
                 logger.debug('No homeworks found for now')
                 continue
             homework = homeworks[0]
